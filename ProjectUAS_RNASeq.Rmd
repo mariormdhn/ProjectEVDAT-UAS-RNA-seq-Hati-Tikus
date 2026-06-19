@@ -1,0 +1,523 @@
+---
+title: "Analisis Eksplorasi dan Visualisasi Data RNA-seq Hati Tikus"
+subtitle: "Dataset GEO GSE326527 — Infeksi Murine Norovirus CR6 pada *Mus musculus*"
+author:
+  - "Mario Ilham Ramadhan"
+  - "Rakazaki Putra Hendrawan"
+  - "Tri Setyo Agus Wibowo"
+  - "M Haedar Rafli A"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    number_sections: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width  = 10,
+  fig.height = 6,
+  fig.align  = "center"
+)
+
+# Load semua library yang dibutuhkan
+library(readr)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(ggplot2)
+library(corrplot)
+library(pheatmap)
+library(RColorBrewer)
+library(factoextra)
+```
+
+---
+
+# Pendahuluan
+
+Dataset yang digunakan adalah **GSE326527** dari NCBI GEO, berisi data RNA-seq jaringan hati (*liver*) tikus *Mus musculus* yang terinfeksi **murine norovirus strain CR6** selama 5 hari pasca infeksi (*days post infection*, dpi).
+
+## Desain Eksperimen
+
+| Kelompok     | Keterangan                              | Jumlah Sampel |
+|:-------------|:----------------------------------------|:-------------:|
+| **STAT1Het** | Heterozygous (kontrol, STAT1 fungsional) | 5             |
+| **STAT1KO**  | Knockout (STAT1 tidak aktif)             | 5             |
+
+**STAT1** (*Signal Transducer and Activator of Transcription 1*) adalah protein kunci dalam jalur pensinyalan interferon. Perbandingan antara kelompok Het dan KO memungkinkan kita mengamati bagaimana hilangnya STAT1 mempengaruhi respons transkriptomik hati terhadap infeksi virus.
+
+## Tujuan Analisis
+
+Mengeksplorasi apakah terdapat **perbedaan pola ekspresi gen global** antara kelompok STAT1Het dan STAT1KO melalui pendekatan analisis eksploratif (*Exploratory Data Analysis / EDA*) pada data RNA-seq.
+
+## Tahapan Analisis
+
+1. **Data Loading & Cleaning** — memuat data, menangani missing value, dan memfilter gen dengan ekspresi rendah
+2. **Eksplorasi Data** — statistik deskriptif per sampel
+3. **Visualisasi Distribusi** — boxplot dan histogram sebelum & sesudah transformasi
+4. **Transformasi Log2** — untuk menormalkan distribusi skewed pada data count
+5. **Analisis Korelasi** — matriks korelasi Pearson antar sampel
+6. **Principal Component Analysis (PCA)** — reduksi dimensi untuk melihat pemisahan kelompok
+7. **Hierarchical Clustering** — pengelompokan sampel berbasis kemiripan ekspresi
+8. **Heatmap Top Variable Genes** — visualisasi 20 gen dengan variansi tertinggi
+
+---
+
+# Load Data
+
+```{r load-data}
+# Sesuaikan path file CSV dengan lokasi di komputer Anda
+data <- read_csv("GSE326527_expression_data.csv")
+
+cat("Dimensi dataset:", nrow(data), "baris x", ncol(data), "kolom\n")
+cat("Preview nama kolom:\n")
+print(colnames(data))
+```
+
+---
+
+# Data Cleaning
+
+## Menangani Gen Tanpa Nama (*Missing Symbols*)
+
+```{r cleaning-symbols}
+# Pastikan kolom symbols bertipe karakter
+data$symbols <- as.character(data$symbols)
+
+# Isi NA pada symbols dengan label "Unknown_N"
+data$symbols[is.na(data$symbols)] <- paste0(
+  "Unknown_",
+  seq_len(sum(is.na(data$symbols)))
+)
+
+# Pastikan semua nama gen unik (hindari duplikasi row name)
+data$symbols <- make.unique(data$symbols)
+
+cat("Jumlah nama gen yang telah dibuat unik:", length(data$symbols), "\n")
+```
+
+## Seleksi Kolom Sampel Liver
+
+```{r cleaning-select-liver}
+# Jadikan kolom symbols sebagai row name, lalu pilih kolom sampel liver saja
+expr <- data %>%
+  column_to_rownames("symbols") %>%
+  select(starts_with("liver"))
+
+cat("Matriks ekspresi liver:\n")
+cat("  -", nrow(expr), "gen\n")
+cat("  -", ncol(expr), "sampel\n")
+cat("Nama sampel:", paste(colnames(expr), collapse = ", "), "\n")
+```
+
+## Cek Missing Value
+
+```{r cleaning-missing}
+n_missing <- sum(is.na(expr))
+cat("Jumlah missing value:", n_missing, "\n")
+
+if (n_missing == 0) {
+  cat("Tidak ada missing value. Data siap diproses.\n")
+}
+```
+
+## Filter Gen Ekspresi Rendah
+
+Gen dengan rata-rata ekspresi ≤ 10 di semua sampel dianggap tidak informatif dan dihapus untuk mengurangi noise.
+
+```{r cleaning-filter-lowexpr}
+# Simpan jumlah gen sebelum filter
+n_before <- nrow(expr)
+
+# Filter: pertahankan gen dengan rata-rata counts > 10
+expr <- expr[rowMeans(expr) > 10, ]
+
+cat("Gen sebelum filter :", n_before, "\n")
+cat("Gen setelah filter  :", nrow(expr), "\n")
+cat("Gen yang dihapus    :", n_before - nrow(expr), "\n")
+```
+
+---
+
+# Eksplorasi Data
+
+## Statistik Deskriptif Per Sampel
+
+```{r explorasi-stats}
+sample_stats <- data.frame(
+  Sample         = colnames(expr),
+  Total_Counts   = colSums(expr),
+  Mean_Expr      = round(colMeans(expr), 2),
+  Var_Expr       = round(apply(expr, 2, var), 2),
+  Median_Expr    = round(apply(expr, 2, median), 2),
+  Genes_Detected = colSums(expr > 0),
+  Detection_Rate = round(colSums(expr > 0) / nrow(expr) * 100, 1)
+)
+
+# Tampilkan tabel
+sample_stats
+```
+
+> **Interpretasi:** Tabel di atas menunjukkan ringkasan statistik per sampel. *Detection rate* yang tinggi dan konsisten antar sampel mengindikasikan kualitas sekuensing yang baik. Perbedaan nilai *total counts* antar sampel menjadi alasan perlunya transformasi data sebelum analisis lebih lanjut.
+
+---
+
+# Visualisasi Distribusi Data
+
+## Visualisasi Sebelum Transformasi (*Raw Counts*)
+
+```{r viz-raw-boxplot}
+# Ubah ke format long untuk ggplot
+expr_long <- expr %>%
+  rownames_to_column(var = "Gene") %>%
+  pivot_longer(
+    cols      = -Gene,
+    names_to  = "Sample",
+    values_to = "Counts"
+  )
+
+# Boxplot raw counts
+boxplot_expr_raw <- ggplot(
+  expr_long,
+  aes(x = Sample, y = Counts + 1, fill = Sample)
+) +
+  geom_boxplot() +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  labs(
+    title = "Distribusi Ekspresi Gen Sampel Liver (Data Mentah)",
+    x = "Sampel",
+    y = "Raw Counts",
+    fill = "Sampel"
+  ) 
+ 
+print(boxplot_expr_raw)
+```
+
+```{r viz-raw-histogram}
+# Histogram raw counts per sampel
+histogram_expr_raw <- ggplot(
+  expr_long,
+  aes(x = Counts + 1, fill = Sample)
+) +
+  geom_histogram(
+    bins = 50,
+    alpha = 0.7
+  ) +
+  facet_wrap(~Sample, scales = "free_y") +
+  theme_minimal() +
+  labs(
+    title = "Histogram Distribusi Ekspresi Gen Sampel Liver (Raw)",
+    x = "Raw Counts",
+    y = "Frekuensi",
+    fill = "Sampel"
+  ) 
+
+print(histogram_expr_raw)
+```
+
+> **Interpretasi:** Data mentah RNA-seq bersifat *right-skewed* (condong ke kanan) karena sebagian besar gen memiliki ekspresi rendah sementara sedikit gen memiliki ekspresi sangat tinggi. Kondisi ini membuat perbandingan langsung antar sampel kurang tepat, sehingga diperlukan transformasi.
+
+---
+
+# Transformasi Log2
+
+Transformasi **log2(x + 1)** diaplikasikan untuk:
+
+- Menstabilkan variansi (*variance stabilization*)
+- Mendekati distribusi normal
+- Mempermudah interpretasi biologis (selisih 1 unit = 2× lipat ekspresi / *fold change*)
+
+```{r transformasi-log2}
+expr_log <- log2(expr + 1)
+
+cat("Statistik ringkas setelah transformasi log2:\n")
+print(summary(as.vector(as.matrix(expr_log))))
+```
+
+## Visualisasi Setelah Transformasi Log2
+
+```{r viz-log-boxplot}
+# Ubah ke format long
+expr_long_log <- expr_log %>%
+  rownames_to_column(var = "Gene") %>%
+  pivot_longer(
+    cols      = -Gene,
+    names_to  = "Sample",
+    values_to = "Log_Counts"
+  )
+
+# Boxplot setelah transformasi
+ggplot(expr_long_log, aes(x = Sample, y = Log_Counts, fill = Sample)) +
+  geom_boxplot(outlier.size = 0.5, alpha = 0.8) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x     = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  ) +
+  labs(
+    title    = "Distribusi Ekspresi Gen — Setelah Transformasi Log2",
+    subtitle = "Distribusi menjadi lebih simetris dan dapat dibandingkan antar sampel",
+    x        = "Sampel",
+    y        = "Log2(Counts + 1)"
+  )
+```
+
+```{r viz-log-histogram}
+# Histogram setelah transformasi
+ggplot(expr_long_log, aes(x = Log_Counts, fill = Sample)) +
+  geom_histogram(bins = 40, alpha = 0.8, show.legend = FALSE) +
+  facet_wrap(~Sample, scales = "free_y", ncol = 5) +
+  theme_minimal(base_size = 10) +
+  theme(
+    strip.text  = element_text(face = "bold", size = 9),
+    panel.spacing = unit(1.5, "lines"),
+    axis.text.x = element_text(size = 7)
+  ) +
+  labs(
+    title    = "Histogram Distribusi Ekspresi Gen — Setelah Log2 Transformasi",
+    subtitle = "Distribusi mendekati normal, lebih sesuai untuk analisis statistik",
+    x        = "Log2(Counts + 1)",
+    y        = "Frekuensi"
+  )
+```
+
+> **Interpretasi:** Setelah transformasi log2, distribusi data menjadi lebih simetris dan mendekati distribusi normal. Hal ini memungkinkan penggunaan metode-metode analisis berbasis asumsi normalitas seperti PCA dan korelasi Pearson.
+
+---
+
+# Analisis Korelasi Antar Sampel
+
+Korelasi Pearson dihitung pada data yang telah ditransformasi log2. Nilai korelasi tinggi (mendekati 1) antar sampel dalam kelompok yang sama mengindikasikan konsistensi biologis yang baik (*good replicates*).
+
+```{r korelasi-matrix}
+cor_matrix <- cor(expr_log, method = "pearson")
+cat("Matriks korelasi Pearson (dibulatkan 3 desimal):\n")
+print(round(cor_matrix, 3))
+```
+
+## Correlation Heatmap
+
+```{r korelasi-heatmap}
+# Tentukan warna anotasi kelompok
+group_colors <- list(
+  Group = c(Het = "#2196F3", KO = "#F44336")
+)
+
+# Anotasi kolom berdasarkan kelompok
+annotation_col <- data.frame(
+  Group = factor(c("Het", "Het", "KO", "KO", "KO", "Het", "Het", "KO", "KO", "Het"))
+)
+rownames(annotation_col) <- colnames(expr_log)
+
+pheatmap(
+  cor_matrix,
+  annotation_col   = annotation_col,
+  annotation_colors = group_colors,
+  display_numbers  = TRUE,
+  number_format    = "%.2f",
+  fontsize_number  = 8,
+  fontsize         = 10,
+  color            = colorRampPalette(c("#FFF9C4", "#FF6F00"))(100),
+  main             = "Correlation Heatmap — Sampel Liver (Pearson)"
+)
+```
+
+> **Interpretasi:** Heatmap korelasi menunjukkan seberapa mirip pola ekspresi global antar sampel. Idealnya, sampel dalam kelompok yang sama (Het–Het atau KO–KO) memiliki korelasi lebih tinggi dibanding antar kelompok. Pola ini menjadi indikator awal adanya perbedaan biologis antara STAT1Het dan STAT1KO.
+
+---
+
+# Pemilihan Top Variable Genes
+
+Untuk analisis PCA dan clustering, digunakan **20 gen dengan variansi tertinggi** (*top variable genes*). Pendekatan ini memfokuskan analisis pada gen yang paling informatif dalam membedakan sampel.
+
+```{r topgene-variance}
+# Definisi kelompok sampel
+group <- factor(c("Het", "Het", "KO", "KO", "KO", "Het", "Het", "KO", "KO", "Het"))
+
+# Hitung variansi per gen
+gene_variance <- apply(expr_log, 1, var)
+
+cat("Ringkasan variansi gen:\n")
+print(summary(gene_variance))
+```
+
+```{r topgene-select}
+# Ambil 20 gen dengan variansi tertinggi
+top20 <- expr_log[order(gene_variance, decreasing = TRUE)[1:20], ]
+
+cat("Dimensi matriks top 20 gen:", nrow(top20), "gen x", ncol(top20), "sampel\n")
+cat("Nama gen terpilih:\n")
+print(rownames(top20))
+```
+
+---
+
+# Principal Component Analysis (PCA)
+
+PCA adalah teknik reduksi dimensi yang memproyeksikan data berdimensi tinggi ke komponen-komponen utama (*principal components*) yang menangkap variansi terbesar. Analisis ini dilakukan pada level sampel (bukan gen).
+
+```{r pca-run}
+# Transpose: baris = sampel, kolom = gen (format yang dibutuhkan prcomp)
+pca_data   <- t(top20)
+pca_result <- prcomp(pca_data, center = TRUE, scale. = TRUE)
+
+cat("Ringkasan PCA:\n")
+print(summary(pca_result))
+```
+
+## Scree Plot — Proporsi Variansi
+
+```{r pca-screeplot}
+fviz_eig(
+  pca_result,
+  addlabels = TRUE,
+  ylim      = c(0, 85),
+  barfill   = "#42A5F5",
+  barcolor  = "#1565C0",
+  linecolor = "#E53935"
+) +
+  labs(
+    title    = "Scree Plot PCA",
+    subtitle = "Persentase variansi yang dijelaskan oleh setiap Principal Component",
+    x        = "Principal Component",
+    y        = "Persentase Variansi (%)"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+## PCA Score Plot (PC1 vs PC2)
+
+```{r pca-scoreplot}
+pc_scores        <- as.data.frame(pca_result$x)
+pc_scores$Group  <- group
+
+# Hitung persentase variansi untuk label sumbu
+pct_var <- round(summary(pca_result)$importance[2, ] * 100, 1)
+
+ggplot(pc_scores, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(size = 5, alpha = 0.9) +
+  scale_color_manual(values = c(Het = "#2196F3", KO = "#F44336")) +
+  theme_classic(base_size = 13) +
+  labs(
+    title    = "PCA Score Plot — Sampel Liver",
+    subtitle = "Berdasarkan 20 gen dengan variansi tertinggi",
+    x        = paste0("PC1 (", pct_var[1], "% variansi)"),
+    y        = paste0("PC2 (", pct_var[2], "% variansi)"),
+    color    = "Kelompok"
+  )
+```
+
+## PCA dengan Confidence Ellipse (95%)
+
+```{r pca-ellipse}
+fviz_pca_ind(
+  pca_result,
+  geom.ind      = "point",
+  pointsize     = 5,
+  habillage     = group,
+  addEllipses   = TRUE,
+  ellipse.level = 0.95,
+  palette       = c("#2196F3", "#F44336"),
+  repel         = TRUE,
+  legend.title  = "Kelompok"
+) +
+  labs(
+    title    = "PCA dengan Confidence Ellipse (95%)",
+    subtitle = "Pemisahan kelompok STAT1Het vs STAT1KO"
+  ) +
+  theme_classic(base_size = 12)
+```
+
+> **Interpretasi:** Score plot PCA memvisualisasikan posisi setiap sampel dalam ruang dua dimensi (PC1 dan PC2). Jika sampel dari kelompok Het dan KO membentuk klaster yang terpisah, hal ini mengindikasikan adanya **perbedaan pola ekspresi gen yang sistematis** antara kedua kelompok, yang kemungkinan besar dipengaruhi oleh status STAT1. Ellipse 95% mempertegas batas pemisahan antar kelompok secara statistik.
+
+---
+
+# Hierarchical Clustering
+
+Hierarchical clustering mengelompokkan sampel berdasarkan kemiripan profil ekspresi menggunakan jarak Euclidean dan metode *Ward's linkage*. Metode Ward meminimalkan total variansi dalam klaster sehingga cocok untuk data genomik.
+
+```{r hclust-run}
+# Hitung matriks jarak antar sampel
+distance_matrix <- dist(t(top20), method = "euclidean")
+
+# Bangun dendrogram dengan metode Ward.D2
+hc <- hclust(distance_matrix, method = "ward.D2")
+
+# Plot dendrogram
+plot(
+  hc,
+  hang  = -1,
+  cex   = 0.9,
+  main  = "Hierarchical Clustering of Liver Samples",
+  sub   = "Metode: Euclidean distance + Ward.D2 linkage",
+  xlab  = "Sampel",
+  ylab  = "Height (Euclidean Distance)"
+)
+```
+
+> **Interpretasi:** Dendrogram menunjukkan hierarki kemiripan antar sampel. Sampel yang bergabung lebih awal (pada *height* yang lebih rendah) memiliki profil ekspresi yang lebih mirip. Pengelompokan yang konsisten dengan label Het dan KO memperkuat temuan dari PCA.
+
+---
+
+# Heatmap Top 20 Variable Genes
+
+```{r heatmap-top20}
+# Anotasi kelompok untuk heatmap
+annotation_heatmap <- data.frame(Group = group)
+rownames(annotation_heatmap) <- colnames(top20)
+
+# Warna anotasi
+ann_colors <- list(
+  Group = c(Het = "#2196F3", KO = "#F44336")
+)
+
+pheatmap(
+  top20,
+  scale              = "row",
+  annotation_col     = annotation_heatmap,
+  annotation_colors  = ann_colors,
+  show_rownames      = TRUE,
+  show_colnames      = TRUE,
+  clustering_method  = "ward.D2",
+  color              = colorRampPalette(rev(brewer.pal(11, "RdBu")))(100),
+  fontsize_col       = 10,
+  fontsize_row       = 8,
+  border_color       = NA,
+  main               = "Heatmap of Top 20 Most Variable Genes\n(Row Z-Score Scaled)"
+)
+```
+
+> **Interpretasi:** Heatmap menampilkan pola ekspresi 20 gen paling variatif di seluruh sampel, dengan nilai yang telah di-*scale* per baris (*z-score*) sehingga warna mencerminkan ekspresi relatif (bukan nilai absolut). Warna merah menunjukkan ekspresi tinggi relatif terhadap rata-rata, biru menunjukkan ekspresi rendah. Pola terpisah antara kelompok Het dan KO menunjukkan gen-gen ini berpotensi diregulasi oleh jalur STAT1.
+
+---
+
+# Ringkasan & Kesimpulan
+
+Analisis eksplorasi data RNA-seq hati tikus *Mus musculus* (GSE326527) menghasilkan temuan sebagai berikut:
+
+| Analisis | Temuan |
+|:---------|:-------|
+| **Kualitas Data** | Tidak ada missing value; detection rate konsisten antar sampel |
+| **Distribusi** | Data mentah bersifat *right-skewed*; transformasi log2 berhasil menormalkan distribusi |
+| **Korelasi** | Korelasi Pearson tinggi dalam kelompok menunjukkan replikasi biologis yang baik |
+| **PCA** | PC1 menjelaskan variansi terbesar; terdapat indikasi pemisahan kelompok Het vs KO |
+| **Clustering** | Dendrogram mengelompokkan sampel konsisten dengan label kelompok |
+| **Heatmap** | 20 gen tervariabel menunjukkan pola ekspresi berbeda antara Het dan KO |
+
+**Kesimpulan umum:** Terdapat **perbedaan pola ekspresi gen global** antara kelompok STAT1Het dan STAT1KO pada jaringan hati tikus yang terinfeksi murine norovirus CR6. Perbedaan ini konsisten teramati di seluruh metode analisis yang digunakan, mengindikasikan peran penting STAT1 dalam memodulasi respons transkriptomik hati terhadap infeksi virus.
+
+---
+
+
